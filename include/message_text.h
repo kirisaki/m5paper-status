@@ -14,4 +14,9 @@ struct Layout {
 };
 using Measure = std::function<int(const std::string&)>;
 Layout wrap(const std::string& text, int width, size_t maxLines, const Measure& measure);
+struct Page {
+  std::vector<std::string> lines;
+  size_t totalLines = 0;
+};
+Page wrapPage(const std::string& text, int width, size_t firstLine, size_t maxLines, const Measure& measure);
 }  // namespace message_text

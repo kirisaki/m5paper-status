@@ -240,6 +240,27 @@ curl http://<M5PaperのIP>/api/health
 
 ### 文字列投稿
 
+PC からは `note` コマンドでも投稿できる（Python 3 が必要）。リポジトリのルートで登録する。
+
+```sh
+mkdir -p ~/.local/bin
+install -m 755 scripts/note ~/.local/bin/note
+
+note '明日は10時から打ち合わせ'
+note $'買い物リスト\n牛乳、卵、パン'
+printf 'コマンドの結果\n%s\n' "$(date)" | note
+note < message.txt
+```
+
+コピー版は `~/.config/m5paper-status/note.json`（`XDG_CONFIG_HOME` に対応）、
+リポジトリ内の `scripts/note` は `config.local.json` から `hostname` と `api_tokens.device` を読む。
+コピー版用の設定例は `{"hostname":"paper","api_tokens":{"device":""}}`。
+認証する場合は `device` を本体と同じトークンにし、設定ファイルの権限を `600` にする。
+設定がない場合は認証なしで `http://paper.local` に送る。
+`--config` / `M5PAPER_CONFIG` で設定ファイル、`--url` / `PAPER_URL` で本体 URL、
+`PAPER_TOKEN` でトークンを上書きできる。成功時は API の JSON 応答を表示し、失敗時は非ゼロで終了する。
+先頭が `-` の本文は `note -- '-から始まる本文'`、表示のクリアは `note ''`。
+
 最新の 1 件を UTF-8 の `text/plain` で送る。JSON ではなく本文そのものを渡す。
 
 ```sh
@@ -262,21 +283,88 @@ curl --fail-with-body http://paper.local/api/message \
 
 最大 4096 バイト。`Content-Length` が必要（上記の curl では自動設定される）。
 改行とタブ以外の制御文字、不正な UTF-8 は受け付けない。
-本文は本体の NVS に保存してから `202 {"status":"accepted","bytes":...}` を返し、
-続いて画面を更新する。同じ本文なら `200 {"status":"unchanged","bytes":...}` を返し、
+本文は内蔵 Flash の LittleFS に保存してから `202 {"status":"accepted","bytes":...,"id":123}` を返し、
+続いて画面を更新する。同じ本文なら `200 {"status":"unchanged","bytes":...,"id":123}` を返し、
 再保存・再描画を行わない。連続投稿では画面更新を最短 2 秒間隔にまとめる。
-再起動時には最後に保存された全文から画面を復元する。
+同じ本文の連続投稿は履歴を増やさない。まだ履歴がない状態で空文字を投稿すると `id` は `null`。
+再起動時には残っている最新の履歴から画面を復元する。
 
 `GET /api/message` は保存した全文を `text/plain; charset=utf-8` で返す。
 画面では実際の字幅で折り返し、収まらない場合は末尾に「…」を付ける。
 CRLF / CR は表示時に改行、タブは空白 4 個として扱う。絵文字など BMP 外の文字は
 描画ライブラリの制約により画面上で「□」に置き換えるが、保存・取得する原文は保持する。
-空文字列のときは「メッセージを待っています」を表示する。
+空文字列のときはメッセージ欄を空にする。空文字の投稿も、本文が変わる場合は履歴に残る。
 
 主なエラーは `400`（不正な文字や本文）、`401`（設定したトークンが不一致）、
 `405`（未対応メソッド）、`411`（Content-Length なし）、`413`（サイズ超過）、
 `415`（Content-Type 不一致）、`500`（保存失敗）、`503`（保存領域未初期化）。
 エラー時は直前のメッセージを維持する。
+
+### メッセージ履歴・削除
+
+```sh
+# 新しい順に取得（既定20件、最大50件）
+curl 'http://paper.local/api/messages?limit=20'
+# 前の応答の next_before を指定して続きへ
+curl 'http://paper.local/api/messages?limit=20&before=123'
+# 1件の本文・日時を JSON で取得
+curl http://paper.local/api/messages/123
+# 指定した1件を削除
+curl -X DELETE http://paper.local/api/messages/123
+```
+
+一覧の応答例:
+
+```json
+{"messages":[{"id":123,"received_at":1791400000,"bytes":6,"text":"予定"}],"next_before":null,"total":1,"capacity":300}
+```
+
+`received_at` は受信時刻の Unix 秒。時刻同期前の投稿と旧 NVS から移した本文は `null`。
+画面ではメッセージ欄の右下に `YYYY/MM/DD HH:mm` 形式の受信日時を日本時間で表示する
+（REGULAR、16 px）。本文が空の場合と日時不明の場合は日時を表示しない。
+最新の履歴を削除した際は、本文と受信日時を一緒に切り替える。
+個別 GET は一覧の各要素と同じオブジェクトを返す。`before` は ID の排他的な上限で、
+ページが続く場合に `next_before` を返す。終端は `null`。一覧は1件ずつ送信してメモリ使用を抑える。
+無効な ID・ページ指定は `400`、存在しない／削除済みの ID は `404`。
+
+DELETE は `200 {"status":"deleted","id":123,"latest_id":122}` を返す。
+最新を削除すると残っている最新本文を表示し、全件なくなるとメッセージ欄が空になる
+（`latest_id` は `null`）。過去の履歴だけを削除した場合は表示を変えない。
+削除した ID は再起動後も再利用しない。全件一括 DELETE は用意していない。
+これらの API にも `api_tokens.device` の Bearer 認証が適用される。
+
+保存領域は既存パーティションの約3.4 MiB。履歴上限は既定300件で、
+`config.local.json` に `"messages": {"history_limit": 300}` を設定すると1〜300件で変更できる。
+上限を超えた投稿では古い履歴から削除する。上限を減らして書き込んだ場合も、
+次回起動時に古い履歴を削除して新しい上限に合わせる。
+`/api/health` の `message_history_count` / `message_history_limit` でも件数を確認できる。
+
+初回起動時に旧 NVS の最新本文を1件の履歴へ移し、移行後に旧コピーを削除する。
+各本文の保存完了後に履歴一覧を原子的に切り替え、起動時に整合性をチェックする。
+中断された保存の未確定ファイルは回収する。ファイルシステムの初期化は領域全体が
+未使用の場合だけ行い、既存領域の読み込み失敗時には自動フォーマットしない。
+通常のファームウェア書き込みで履歴は保持される。`uploadfs` や全 Flash 消去は履歴を消すため実行しない。
+
+ホスト側の保存・復元・削除・保存失敗テストは `python3 -m unittest discover -s tests -v`。
+実機 API の確認は `python3 tests/device_history_smoke.py --reset-port /dev/ttyUSB0` で行う
+（再起動確認に `pyserial` が必要）。空き履歴枠が3件以上ある場合だけテスト投稿し、
+終了時にその投稿を削除して元の本文と履歴件数へ戻す。
+
+### 本体で履歴を見る
+
+ダッシュボードのメッセージ欄（日時や空白部分も含む）をタップすると、
+新しい順に6件の履歴を表示する。本文は REGULAR 18 px・最大2行のプレビュー、
+受信日時は16 px。長文は末尾に「…」を付け、行をタップすると全文を開く。
+全文表示は20 pxで、長い本文も上下に移動して読める。
+
+- 上スワイプで古い履歴へ、下スワイプで新しい履歴へ移動する。
+- 一覧下部の「新しい」「古い」でも6件ずつ移動できる。全文では「前へ」「次へ」で移動する。
+- 左上の「戻る」で全文から一覧へ、一覧からダッシュボードへ戻る。
+
+電子ペーパーでは指を離してから描き直す。閲覧中も投稿・カレンダー・利用量の更新は継続する。
+古い履歴を読んでいる間に投稿が来ても、表示先頭の履歴をできるだけ維持する。
+API で全文表示中の履歴が削除された場合は一覧に戻る。
+`/api/health` の `screen`（`dashboard` / `history` / `message`）と `history_offset` で表示状態を確認できる。
 
 ## 日本語フォント
 

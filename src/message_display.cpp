@@ -167,7 +167,7 @@ void begin() {
   }
 }
 
-void drawDashboard(const std::string& text, const calendar::Snapshot& schedule, const usage::Snapshot& usageState) {
+void drawDashboard(const std::string& text, int64_t receivedAt, const calendar::Snapshot& schedule, const usage::Snapshot& usageState) {
   if (!canvasReady) return;
   canvas.fillScreen(TFT_WHITE);
   canvas.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -308,8 +308,17 @@ void drawDashboard(const std::string& text, const calendar::Snapshot& schedule, 
     drawText(calendarNotice, 8, kCalendarNoticeTop, width - 16, 18, 1, TFT_WHITE);
   }
 
-  // Message content only. An empty message leaves this space blank.
+  // Keep three body lines, with the received time below them at the right edge.
+  // An empty message or an unknown received time has no timestamp label.
   messageTruncated = drawText(text, 16, kMessageTop, width - 32, 26, 3, TFT_WHITE);
+  if (!text.empty() && receivedAt > 0) {
+    std::string stamp = calendar::rfc3339(receivedAt).substr(0, 16);
+    std::replace(stamp.begin(), stamp.end(), '-', '/');
+    std::replace(stamp.begin(), stamp.end(), 'T', ' ');
+    const int stampWidth = std::min(width - 32, measure(stamp, 16) + 2);
+    drawText(stamp, width - 16 - stampWidth, kMessageTop + 90, stampWidth, 16, 1, TFT_WHITE);
+    Serial.printf("Message timestamp rendered: %s JST\n", stamp.c_str());
+  }
   canvas.drawFastHLine(16, kUsageTop - 19, width - 32, rule);
   const int64_t now = time(nullptr);
   const auto graph = [&](const usage::Provider& provider,
@@ -361,6 +370,106 @@ void drawDashboard(const std::string& text, const calendar::Snapshot& schedule, 
   if (titleFont) heading.unloadFont();
   Serial.printf("Dashboard rendered: 7 columns, calendar=%u events, usage=live\n",
                 static_cast<unsigned>(schedule.events.size()));
+}
+
+void drawHistory(history_ui::State& state, const std::vector<message_history::Entry>& entries, bool readable) {
+  if (!canvasReady) return;
+  using namespace history_ui;
+  canvas.fillScreen(TFT_WHITE);
+  canvas.setFont(&fonts::lgfxJapanGothic_20);
+  canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+  const int width = canvas.width();
+  const uint16_t rule = 0xBDF7;
+  const bool detail = state.screen() == Screen::DETAIL;
+  OpenFontRender font;
+  usingRegular = loadFont(font, REGULAR, 18);
+  const auto measure = [&](const std::string& value, unsigned size) -> int {
+    if (!usingRegular) return canvas.textWidth(value.c_str());
+    const auto box = font.calculateBoundingBox(0, 0, size, Align::Left, Layout::Horizontal, value.c_str());
+    return box.xMax - box.xMin;
+  };
+  const auto line = [&](const std::string& value, int x, int y, int w, unsigned size) {
+    canvas.setClipRect(x, y, w, size + 4);
+    if (usingRegular) {
+      font.setFontSize(size);
+      font.drawString(value.c_str(), x, y, TFT_BLACK, TFT_WHITE);
+    } else {
+      canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+      canvas.setCursor(x, y); canvas.print(value.c_str());
+    }
+    canvas.clearClipRect();
+  };
+  const auto date = [](int64_t seconds) {
+    if (!seconds) return std::string("日時不明");
+    std::string result = calendar::rfc3339(seconds).substr(0, 16);
+    std::replace(result.begin(), result.end(), '-', '/');
+    std::replace(result.begin(), result.end(), 'T', ' ');
+    return result;
+  };
+  canvas.drawRoundRect(12, 8, 120, 46, 6, TFT_BLACK);
+  line("戻る", 45, 18, 80, 20);
+  canvas.drawFastHLine(16, kHeader - 1, width - 32, rule);
+  if (!readable || (detail && entries.empty())) {
+    line("履歴を読み込めません", 20, 90, width - 40, 20);
+    if (detail) state.setDetailLines(0);
+  } else if (!detail && entries.empty()) {
+    line("メッセージの履歴はありません", 20, 90, width - 40, 20);
+  } else if (detail) {
+    const auto& entry = entries.front();
+    line(date(entry.receivedAt), 20, 70, width - 40, 16);
+    const std::string& text = entry.text.empty() ? std::string("（空のメッセージ）") : entry.text;
+    auto page = message_text::wrapPage(text, width - 48, state.detailOffset(), kDetailRows,
+                                     [&](const std::string& value) { return measure(value, 20); });
+    const size_t previousOffset = state.detailOffset();
+    state.setDetailLines(page.totalLines);
+    if (previousOffset != state.detailOffset()) {
+      page = message_text::wrapPage(text, width - 48, state.detailOffset(), kDetailRows,
+                                  [&](const std::string& value) { return measure(value, 20); });
+    }
+    for (size_t i = 0; i < page.lines.size(); ++i) line(page.lines[i], 20, 96 + i * kDetailStep, width - 48, 20);
+  } else {
+    for (size_t row = 0; row < entries.size(); ++row) {
+      const int y = kHeader + row * kRowHeight;
+      line(date(entries[row].receivedAt), 20, y + 1, width - 48, 16);
+      const std::string& text = entries[row].text.empty() ? std::string("（空のメッセージ）") : entries[row].text;
+      const auto preview = message_text::wrap(text, width - 48, 2,
+                                            [&](const std::string& value) { return measure(value, 18); });
+      for (size_t i = 0; i < preview.lines.size(); ++i) line(preview.lines[i], 20, y + 23 + i * 22, width - 48, 18);
+      canvas.drawFastHLine(16, y + kRowHeight - 1, width - 32, rule);
+    }
+  }
+  const size_t total = detail ? state.detailLines() : state.count();
+  const size_t offset = detail ? state.detailOffset() : state.offset();
+  const size_t visible = detail ? kDetailRows : kRows;
+  const std::string position = total ? std::to_string(offset + 1) + "–" + std::to_string(std::min(total, offset + visible))
+                                   + " / " + std::to_string(total) : "0 件";
+  line(position, width - 204, 21, 188, 18);
+  canvas.drawFastHLine(16, kFooter, width - 32, rule);
+  if (offset) {
+    canvas.drawRoundRect(16, kFooter + 7, 200, 42, 6, TFT_BLACK);
+    line(detail ? "前へ" : "新しい", 78, kFooter + 16, 120, 18);
+  }
+  if (offset + visible < total) {
+    canvas.drawRoundRect(width - 216, kFooter + 7, 200, 42, 6, TFT_BLACK);
+    line(detail ? "次へ" : "古い", width - 155, kFooter + 16, 120, 18);
+  }
+  line(detail ? "上下スワイプでスクロール" : "上下スワイプ / タップで全文", 310, kFooter + 18, 360, 16);
+  if (total > visible) {
+    const int trackTop = detail ? 96 : kHeader;
+    const int trackHeight = kFooter - trackTop - 4;
+    const int thumb = std::max(12, int(trackHeight * visible / total));
+    const int top = trackTop + (trackHeight - thumb) * offset / (total - visible);
+    canvas.fillRect(width - 9, top, 4, thumb, TFT_BLACK);
+  }
+  if (usingRegular) font.unloadFont();
+  if (loadFont(font, BOLD, 24)) {
+    font.drawString(detail ? "メッセージ" : "メッセージ履歴", 160, 16, TFT_BLACK, TFT_WHITE);
+    font.unloadFont();
+  } else {
+    canvas.setCursor(160, 18); canvas.print(detail ? "メッセージ" : "メッセージ履歴");
+  }
+  Serial.printf("History rendered: %s, offset=%u, count=%u\n", detail ? "detail" : "list",
+                static_cast<unsigned>(offset), static_cast<unsigned>(total));
 }
 
 void present() {

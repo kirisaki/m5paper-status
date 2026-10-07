@@ -50,7 +50,12 @@ def render_header(path):
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ConfigError("configuration must be valid UTF-8 JSON") from None
 
-    _object(data, {"hostname", "fonts", "wifi", "api_tokens", "calendar", "usage"}, "configuration")
+    _object(data, {"hostname", "fonts", "messages", "wifi", "api_tokens", "calendar", "usage"}, "configuration")
+    messages = data.get("messages", {})
+    _object(messages, {"history_limit"}, "messages")
+    history_limit = messages.get("history_limit", 300)
+    if type(history_limit) is not int or not 1 <= history_limit <= 300:
+        raise ConfigError("messages.history_limit must be an integer from 1 to 300")
     hostname = _string(data.get("hostname", "paper"), "hostname")
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", hostname):
         raise ConfigError("hostname must be 1-63 lowercase ASCII letters, digits or hyphens, without a leading/trailing hyphen; omit .local")
@@ -152,6 +157,7 @@ def render_header(path):
         "namespace config {",
         f"constexpr char kHostname[] = {cpp_string(hostname)};",
         *font_entries,
+        f"constexpr unsigned kMessageHistoryLimit = {history_limit};",
         f"constexpr char kWifiSsid[] = {cpp_string(ssid)};",
         f"constexpr char kWifiPassword[] = {cpp_string(password)};",
         f"constexpr char kCalendarId[] = {cpp_string(calendar_id)};",

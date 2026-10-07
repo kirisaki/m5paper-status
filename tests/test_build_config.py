@@ -105,6 +105,14 @@ class BuildConfigTests(unittest.TestCase):
         self.assertIn('constexpr char kFontRegular[] = "";', header)
         self.assertIn(build_config.cpp_string('Other-Heavy.TTF'), header)
 
+    def test_message_history_capacity(self):
+        for limit in (0, 301, -1, True, "300"):
+            self.write_config({"messages": {"history_limit": limit}})
+            with self.assertRaises(build_config.ConfigError):
+                build_config.render_header(self.config)
+        self.write_config({"messages": {"history_limit": 12}})
+        self.assertIn("kMessageHistoryLimit = 12;", build_config.render_header(self.config))
+
     def test_config_selection_and_updates(self):
         from unittest.mock import patch
 

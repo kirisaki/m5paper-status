@@ -9,6 +9,7 @@
 #include "message_service.h"
 #include "calendar_service.h"
 #include "usage_service.h"
+#include "history_ui.h"
 
 namespace {
 WebServer server(config::kHttpPort);
@@ -19,6 +20,37 @@ uint32_t lastWifiAttempt = 0;
 uint32_t lastMdnsAttempt = 0;
 IPAddress displayedIp;
 uint32_t lastMessageRefresh = 0;
+history_ui::State ui;
+uint32_t seenHistoryRevision = 0;
+
+void updateTouch() {
+  const unsigned count = M5.Touch.getCount();
+  if (count != 1) { ui.cancelTouch(); return; }
+  const auto& touch = M5.Touch.getDetail();
+  if (touch.wasPressed()) ui.press(touch.x, touch.y);
+  else if (touch.isPressed()) ui.move(touch.x, touch.y);
+  else if (touch.wasReleased()) ui.release(touch.x, touch.y);
+}
+
+void drawScreen() {
+  if (ui.screen() == history_ui::Screen::DASHBOARD) {
+    message_display::drawDashboard(message_service::text(), message_service::receivedAt(), calendar_service::snapshot(), usage_service::snapshot());
+    return;
+  }
+  std::vector<message_history::Entry> entries;
+  bool readable = message_service::storageReady();
+  const auto load = [&](uint32_t id) {
+    message_history::Entry entry;
+    if (message_service::readHistory(id, entry)) entries.push_back(std::move(entry));
+    else readable = false;
+  };
+  if (ui.screen() == history_ui::Screen::DETAIL) load(ui.selected());
+  else {
+    const auto& ids = message_service::historyIds();
+    for (size_t i = ui.offset(); i < ids.size() && i < ui.offset() + history_ui::kRows; ++i) load(ids[ids.size() - 1 - i]);
+  }
+  message_display::drawHistory(ui, entries, readable);
+}
 
 void configureApi() {
   server.on("/api/health", HTTP_GET, []() {
@@ -34,6 +66,15 @@ void configureApi() {
     body += message_service::storageReady() ? "true" : "false";
     body += ",\"message_bytes\":";
     body += String(message_service::text().size());
+    body += ",\"message_history_count\":";
+    body += String(message_service::historyCount());
+    body += ",\"message_history_limit\":";
+    body += String(config::kMessageHistoryLimit);
+    body += ",\"screen\":\"";
+    body += ui.screen() == history_ui::Screen::DASHBOARD ? "dashboard" :
+            ui.screen() == history_ui::Screen::LIST ? "history" : "message";
+    body += "\",\"history_offset\":";
+    body += String(ui.offset());
     body += ",\"message_pending\":";
     body += message_service::pending() ? "true" : "false";
     body += ",\"message_truncated\":";
@@ -128,7 +169,9 @@ void setup() {
   message_service::begin(server);
   calendar_service::begin(server);
   usage_service::begin(server);
-  message_display::drawDashboard(message_service::text(), calendar_service::snapshot(), usage_service::snapshot());
+  ui.sync(message_service::historyIds());
+  seenHistoryRevision = message_service::historyRevision();
+  drawScreen();
   message_display::present();
   message_service::rendered();
   calendar_service::rendered();
@@ -150,19 +193,27 @@ void setup() {
 
 void loop() {
   M5.update();
+  updateTouch();
   updateNetwork();
   calendar_service::tick();
   usage_service::tick();
+  if (seenHistoryRevision != message_service::historyRevision()) {
+    ui.sync(message_service::historyIds());
+    seenHistoryRevision = message_service::historyRevision();
+  }
   // Acknowledge and persist submissions before the slow EPD refresh.
   // Coalesce rapid posts and refresh at most once every two seconds.
-  if ((message_service::pending() || calendar_service::pending() || usage_service::pending()) && millis() - lastMessageRefresh >= 2000 &&
+  const bool dashboardPending = ui.screen() == history_ui::Screen::DASHBOARD &&
+      (message_service::pending() || calendar_service::pending() || usage_service::pending());
+  if ((ui.dirty() || dashboardPending) && !ui.touching() && millis() - lastMessageRefresh >= (ui.dirty() ? 100 : 2000) &&
       calendar_service::tryBeginRender()) {
-    message_display::drawDashboard(message_service::text(), calendar_service::snapshot(), usage_service::snapshot());
+    drawScreen();
     message_display::present();
     calendar_service::endRender();
     message_service::rendered();
     calendar_service::rendered();
     usage_service::rendered();
+    ui.rendered();
     lastMessageRefresh = millis();
   }
   delay(10);

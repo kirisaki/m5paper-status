@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Send a UTF-8 note to M5Paper, from arguments or standard input."""
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description="M5Paper にメッセージを送信します。引数なしでは標準入力を読みます。")
+    parser.add_argument("--url", help="本体の URL（既定: 設定の hostname、または http://paper.local）")
+    parser.add_argument("--config", help="設定 JSON のパス")
+    parser.add_argument("text", nargs="*", help="本文。複数の引数は空白で連結します。")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    in_repository = (root / "platformio.ini").is_file()
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))).expanduser()
+    default_config = root / "config.local.json" if in_repository else config_dir / "m5paper-status" / "note.json"
+    selected = args.config or os.environ.get("M5PAPER_CONFIG")
+    path = Path(selected).expanduser() if selected else default_config
+    if selected and not args.config and not path.is_absolute():
+        path = (root if in_repository else Path.cwd()) / path
+    config = {}
+    if selected or path.exists():
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError()
+        except (OSError, ValueError, UnicodeError):
+            parser.error("設定 JSON を読み込めません")
+    hostname = config.get("hostname", "paper")
+    tokens = config.get("api_tokens", {})
+    if not isinstance(hostname, str) or not isinstance(tokens, dict):
+        parser.error("設定の hostname / api_tokens が不正です")
+    url = args.url or os.environ.get("PAPER_URL") or "http://" + hostname + ".local"
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
+        parser.error("--url / PAPER_URL は http://paper.local のように本体の URL を指定してください")
+    token = os.environ.get("PAPER_TOKEN", tokens.get("device", ""))
+    if not isinstance(token, str) or any(ord(c) < 33 or ord(c) > 126 for c in token):
+        parser.error("device トークンは空文字、または空白を含まない ASCII 文字列にしてください")
+    if not args.text and sys.stdin.isatty():
+        parser.error("note '本文' または printf '本文' | note の形で指定してください")
+    try:
+        body = " ".join(args.text).encode("utf-8") if args.text else sys.stdin.buffer.read(4097)
+        if len(body) > 4096:
+            parser.error("本文は UTF-8 で4096バイトまでです")
+        body.decode("utf-8")
+    except UnicodeError:
+        parser.error("本文は UTF-8 で指定してください")
+    headers = {"Content-Type": "text/plain; charset=utf-8"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(url.rstrip("/") + "/api/message", data=body, headers=headers, method="POST")
+    # This is a direct LAN connection; do not forward the device token to an
+    # HTTP proxy configured for unrelated internet traffic.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open(request, timeout=15) as response:
+            result = json.load(response)
+        print(json.dumps(result, ensure_ascii=False))
+    except urllib.error.HTTPError as error:
+        print(f"note: 投稿に失敗しました (HTTP {error.code})", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, OSError, ValueError):
+        print("note: 本体に接続できないか、応答を読み取れませんでした", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

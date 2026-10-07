@@ -1,5 +1,8 @@
 {
   "hostname": "paper",
+  "messages": {
+    "history_limit": 300
+  },
   "fonts": {
     "REGULAR": "MPLUS1p-Medium.ttf",
     "BOLD": "MPLUS1p-ExtraBold.ttf"

@@ -93,4 +93,33 @@ Layout wrap(const std::string& text, int width, size_t maxLines, const Measure& 
   }
   return result;
 }
+Page wrapPage(const std::string& text, int width, size_t firstLine, size_t maxLines, const Measure& measure) {
+  Page result;
+  if (text.empty() || width <= 0 || !maxLines || !valid(text)) return result;
+  // Scan all line boundaries but retain only the visible page: even 4096
+  // newlines must not allocate thousands of strings on the ESP32 heap.
+  const auto emit = [&](const std::string& line) {
+    if (result.totalLines >= firstLine && result.lines.size() < maxLines) result.lines.push_back(line);
+    ++result.totalLines;
+  };
+  std::string line;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    const size_t start = pos;
+    uint32_t code;
+    decode(text, pos, code);
+    if (code == '\r' || code == '\n') {
+      if (code == '\r' && pos < text.size() && text[pos] == '\n') ++pos;
+      emit(line); line.clear(); continue;
+    }
+    const std::string glyph = code > 0xFFFF ? "□" : code == '\t' ? "    " : text.substr(start, pos - start);
+    const std::string candidate = line + glyph;
+    if (!line.empty() && (candidate.size() > 240 || measure(candidate) > width)) {
+      emit(line); line.clear();
+    }
+    line += glyph;
+  }
+  emit(line);
+  return result;
+}
 }  // namespace message_text
