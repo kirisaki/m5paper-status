@@ -1,0 +1,27 @@
+{
+  "hostname": "paper",
+  "fonts": {
+    "REGULAR": "MPLUS1p-Medium.ttf",
+    "BOLD": "MPLUS1p-ExtraBold.ttf"
+  },
+  "usage": {
+    "codex_credentials_file": "",
+    "claude_credentials_file": "",
+    "refresh_seconds": 300
+  },
+  "calendar": {
+    "id": "",
+    "service_account_file": "",
+    "refresh_seconds": 300
+  },
+  "wifi": {
+    "ssid": "",
+    "password": ""
+  },
+  "api_tokens": {
+    "device": "",
+    "google_calendar": "",
+    "codex": "",
+    "claude": ""
+  }
+}

@@ -1,0 +1,13 @@
+.pio/
+.vscode/
+include/secrets.h
+config.local.json
+config.*.local.json
+google-calendar.local.json
+credentials/
+fonts/
+__pycache__/
+.agents/
+.aws/
+.codex/
+*:Zone.Identifier
